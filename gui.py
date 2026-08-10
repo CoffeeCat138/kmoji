@@ -8,8 +8,6 @@ Provides:
 - Logging settings (enabled, level, path, open-dir, recent-logs)
 - API Key management (masked display, re-enter, clear)
 """
-import os
-import platform
 import subprocess
 import sys
 import tkinter as tk
@@ -73,6 +71,7 @@ class SettingsWindow:
     def __init__(self, cfg: _cfg_module.Config, on_close=None):
         self.cfg = cfg
         self._on_close = on_close
+        self._on_key_change = None  # set externally by caller
 
         self.root = tk.Tk()
         self.root.title("Kmoji 设置")
@@ -416,7 +415,7 @@ class SettingsWindow:
         self.root.withdraw()
 
     def show(self):
-        """Bring the hidden window back to front."""
+        """Bring the hidden window back to front and refresh all pages."""
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
@@ -427,11 +426,28 @@ class SettingsWindow:
             text=f"当前: {'已启用' if enabled else '未启用'}"
             + (f"  ({path})" if path else "")
         )
+        # Refresh hotkey page (may have changed via tray menu)
+        self._hotkey_enabled_var.set(self.cfg.get("hotkey_enabled", True))
+        self._trigger_var.set(self.cfg.get("trigger_type", "double_shift"))
+        self._custom_var.set(self.cfg.get("custom_trigger", ""))
+        self._interval_var.set(self.cfg.get("double_press_interval", 0.5))
+        # Refresh log page (may have changed via tray menu / other windows)
+        self._log_enabled_var.set(self.cfg.get("logging_enabled", True))
+        self._log_level_var.set(self.cfg.get("log_level", "INFO"))
+        default_path = _logger_module._get_default_log_path()
+        self._log_path_var.set(self.cfg.get("log_path") or default_path)
         # Refresh API key
         current_key = _security_module.load_api_key()
         self._apikey_label.configure(
             text=f"当前 Key: {_security_module.mask_key(current_key)}"
         )
+        # Re-apply custom-combo widget enabled state
+        if self._trigger_var.get() == "custom":
+            self._custom_entry.configure(state="readonly")
+            self._capture_btn.configure(state="normal")
+        else:
+            self._custom_entry.configure(state="disabled")
+            self._capture_btn.configure(state="disabled")
 
     def run(self):
         """Enter the tkinter main loop (blocking)."""

@@ -16,10 +16,6 @@ Architecture note for Windows:
    pystray already does).  This has proved the most stable arrangement.
 """
 import threading
-import sys
-import time
-
-import logger as _logger_module
 
 
 _ICON_HEIGHT = 64

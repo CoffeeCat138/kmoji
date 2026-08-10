@@ -5,8 +5,6 @@ Implements:
 - Window-foreground check so we never paste into the wrong window.
 """
 import ctypes
-import ctypes.wintypes
-import os
 import sys
 import time
 
@@ -79,52 +77,59 @@ def select_text_from_cursor_to_home():
 
     Returns the selected text (from clipboard) or empty string.
     Mitigates TOCTOU by performing the copy and immediately reading back.
+    The user's original clipboard is ALWAYS restored, even on error.
     """
     L = _get_logger()
     old = _paste_safe()
 
-    kb = pynput_keyboard.Controller()
+    try:
+        kb = pynput_keyboard.Controller()
 
-    # Select from cursor to line start
-    kb.press(pynput_keyboard.Key.ctrl_l)
-    kb.press(pynput_keyboard.Key.shift_l)
-    kb.press(pynput_keyboard.Key.home)
-    kb.release(pynput_keyboard.Key.home)
-    kb.release(pynput_keyboard.Key.shift_l)
-    kb.release(pynput_keyboard.Key.ctrl_l)
+        # Select from cursor to line start
+        kb.press(pynput_keyboard.Key.ctrl_l)
+        kb.press(pynput_keyboard.Key.shift_l)
+        kb.press(pynput_keyboard.Key.home)
+        kb.release(pynput_keyboard.Key.home)
+        kb.release(pynput_keyboard.Key.shift_l)
+        kb.release(pynput_keyboard.Key.ctrl_l)
 
-    time.sleep(0.03)  # minimal wait for selection
+        time.sleep(0.03)  # minimal wait for selection
 
-    # Copy
-    kb.press(pynput_keyboard.Key.ctrl_l)
-    kb.press("c")
-    kb.release("c")
-    kb.release(pynput_keyboard.Key.ctrl_l)
+        # Copy
+        kb.press(pynput_keyboard.Key.ctrl_l)
+        kb.press("c")
+        kb.release("c")
+        kb.release(pynput_keyboard.Key.ctrl_l)
 
-    time.sleep(0.03)
+        time.sleep(0.03)
 
-    # Read what we copied
-    selected = _paste_safe()
+        # Read what we copied
+        selected = _paste_safe()
 
-    # Move cursor back to end of selection (Right arrow)
-    kb.press(pynput_keyboard.Key.right)
-    kb.release(pynput_keyboard.Key.right)
-    time.sleep(0.02)
+        # Move cursor back to end of selection (Right arrow)
+        kb.press(pynput_keyboard.Key.right)
+        kb.release(pynput_keyboard.Key.right)
+        time.sleep(0.02)
 
-    # --- TOCTOU mitigation: verify clipboard didn't change underneath us ---
-    verify = _paste_safe()
-    if verify != selected:
-        L.warning(
-            "剪贴板在读取期间被外部修改（TOCTOU）。"
-            f" 期望长度={len(selected)}，实际长度={len(verify)}"
-        )
-        # We can't trust the content, but we still restore old content.
-        _copy_safe(old)
-        return ""
+        # --- TOCTOU mitigation: verify clipboard didn't change underneath us ---
+        verify = _paste_safe()
+        if verify != selected:
+            L.warning(
+                "剪贴板在读取期间被外部修改（TOCTOU）。"
+                f" 期望长度={len(selected)}，实际长度={len(verify)}"
+            )
+            # We can't trust the content — return empty and let finally restore.
+            return ""
 
-    # Restore original clipboard
-    _copy_safe(old)
-    return selected
+        return selected
+    finally:
+        # Always restore the user's original clipboard, even on error.
+        if not _copy_safe(old):
+            L.error(
+                "⚠ 剪贴板恢复失败！原剪贴板内容可能已丢失。"
+                f" 原内容长度={len(old)}"
+                "（内容不写入日志，避免敏感信息泄露）"
+            )
 
 
 def paste_kaomoji(kaomoji: str, expected_hwnd: int = 0):
@@ -173,9 +178,9 @@ def paste_kaomoji(kaomoji: str, expected_hwnd: int = 0):
     finally:
         if not _copy_safe(old):
             L.error(
-                "⚠ 剪贴板恢复失败！原剪贴板内容已丢失。"
-                f" 原内容长度={len(old)}，"
-                f" 已写入日志文件。以下为原内容:\n{old}"
+                "⚠ 剪贴板恢复失败！原剪贴板内容可能已丢失。"
+                f" 原内容长度={len(old)}"
+                "（内容不写入日志，避免敏感信息泄露）"
             )
 
 
@@ -187,9 +192,20 @@ def extract_prefix():
     """Select text from cursor to line-start, return the text part after the
     last punctuation mark.  Records foreground HWND for later window-check.
 
+    The HWND is captured AFTER the selection completes: if the foreground
+    window changed during the simulated key sequence, the text actually came
+    from the new window, so that is the window we must paste back into.
+
     Returns:
         (prefix_text, foreground_hwnd)
     """
-    hwnd = _get_foreground_window()
+    hwnd_before = _get_foreground_window()
     full_text = select_text_from_cursor_to_home()
-    return full_text, hwnd
+    hwnd_after = _get_foreground_window()
+    if (sys.platform == "win32" and hwnd_before and hwnd_after
+            and hwnd_before != hwnd_after):
+        _get_logger().warning(
+            f"取词期间前台窗口发生变化 (0x{hwnd_before:x} → 0x{hwnd_after:x})，"
+            "以取词完成时的窗口作为粘贴目标"
+        )
+    return full_text, hwnd_after

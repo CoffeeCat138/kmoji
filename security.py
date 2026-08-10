@@ -144,19 +144,27 @@ def save_api_key(api_key: str, logger=None):
     """Persist *api_key* and also set it in the current process env.
 
     Tries keyring first; falls back to registry write.
+    Returns True on success, False if nothing could be stored.
     """
     os.environ[ENV_VAR_NAME] = api_key
     if not api_key:
-        return
+        if logger:
+            logger.warning("拒绝保存空的 API Key")
+        return False
 
     if _keyring_set(api_key):
         if logger:
             logger.info("API Key 已保存到 Credential Manager（keyring）")
-        return
+        return True
 
     if _registry_set(api_key):
         if logger:
             logger.info("API Key 已保存到注册表 HKCU\\Environment（明文降级方案）")
+        return True
+
+    if logger:
+        logger.error("API Key 保存失败：keyring 与注册表均不可用")
+    return False
 
 
 def clear_api_key(logger=None):

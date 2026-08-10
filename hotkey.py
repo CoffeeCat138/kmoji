@@ -14,7 +14,7 @@ import unicodedata
 from pynput import keyboard as pynput_keyboard
 
 
-_DOUBLE_PRESS_RECENT_MS = 200  # keep last press for this long max
+_DOUBLE_PRESS_RECENT_SECONDS = 0.2  # keep last press for this long max (seconds)
 
 
 # ── callback registry ──────────────────────────────────────────────────────
@@ -29,10 +29,15 @@ def set_callback(fn):
 
 # ── custom combo parsing ───────────────────────────────────────────────────
 
-_MODIFIER_MAP: dict[str, pynput_keyboard.Key] = {
-    "ctrl": pynput_keyboard.Key.ctrl_l,
-    "shift": pynput_keyboard.Key.shift_l,
-    "alt": pynput_keyboard.Key.alt_l,
+# Base-name → set of pynput key objects that count as that modifier.
+# (Some keyboards report Key.ctrl instead of Key.ctrl_l/ctrl_r, etc.)
+_MODIFIER_KEYS: dict[str, set] = {
+    "ctrl": {pynput_keyboard.Key.ctrl, pynput_keyboard.Key.ctrl_l,
+             pynput_keyboard.Key.ctrl_r},
+    "shift": {pynput_keyboard.Key.shift, pynput_keyboard.Key.shift_l,
+              pynput_keyboard.Key.shift_r},
+    "alt": {pynput_keyboard.Key.alt, pynput_keyboard.Key.alt_l,
+            pynput_keyboard.Key.alt_r},
 }
 
 _MODIFIER_NAMES = {"ctrl", "ctrl_l", "ctrl_r", "shift", "shift_l", "shift_r",
@@ -54,9 +59,10 @@ def _parse_custom_combo(combo_str: str):
     for p in parts:
         low = p.lower()
         if low in _MODIFIER_NAMES:
-            modifiers.add(pynput_keyboard.Key[low] if hasattr(
-                pynput_keyboard.Key, low
-            ) else low)
+            base = low.replace("_l", "").replace("_r", "")
+            if base in _MODIFIER_KEYS:
+                # Store the base name; matching uses the full key-set per base.
+                modifiers.add(base)
         else:
             main_key = p
     if main_key is None:
@@ -106,7 +112,7 @@ def _update_runtime_config(config):
     elif _trigger_type == "custom" and _custom_combo:
         parsed = _parse_custom_combo(_custom_combo)
         if parsed:
-            _MOD_KEYS = parsed[0]
+            _MOD_KEYS = parsed[0]  # set of base modifier names ("ctrl"...)
             _WAKE_KEY = parsed[1]  # the non-modifier key char
 
     _custom_pressed_normal = set()
@@ -132,9 +138,11 @@ def _on_press(key):
 
     # ── custom combo mode ──
     if _trigger_type == "custom" and _MOD_KEYS:
-        if is_mod and key in _MOD_KEYS:
-            _custom_press_cache.add(key)
-        elif not is_mod and hasattr(key, "char") and key.char == _WAKE_KEY:
+        if is_mod:
+            base = key.name.replace("_l", "").replace("_r", "")
+            if base in _MOD_KEYS:
+                _custom_press_cache.add(base)
+        elif hasattr(key, "char") and key.char == _WAKE_KEY:
             _custom_pressed_normal.add(key.char)
         # Fire when all modifiers + the main key are held together
         if (_custom_press_cache == _MOD_KEYS
@@ -148,7 +156,10 @@ def _on_press(key):
     if _WAKE_KEY and key in _WAKE_KEY:
         now = time.time()
         # Keep only presses within a generous recent window
-        _press_times = [t for t in _press_times if now - t < _DOUBLE_PRESS_RECENT_MS]
+        _press_times = [
+            t for t in _press_times
+            if now - t < _DOUBLE_PRESS_RECENT_SECONDS
+        ]
         _press_times.append(now)
         _last_key_was_target = True
     else:
@@ -168,7 +179,8 @@ def _on_release(key):
     if _trigger_type == "custom" and _MOD_KEYS:
         is_mod = hasattr(key, "name") and key.name in _MODIFIER_NAMES
         if is_mod:
-            _custom_press_cache.discard(key)
+            base = key.name.replace("_l", "").replace("_r", "")
+            _custom_press_cache.discard(base)
         elif hasattr(key, "char") and key.char == _WAKE_KEY:
             _custom_pressed_normal.discard(key.char)
         return

@@ -8,12 +8,9 @@ Usage:
     python kmoji.py --test | -t   # debug mode (console output)
     python kmoji.py --settings    # open settings window and exit
 """
-import os
 import sys
 import threading
 import time
-
-from openai import OpenAI
 
 import clipboard as _clipboard
 import config as _config
@@ -39,6 +36,12 @@ SYSTEM_PROMPT = (
 
 _client = None
 _settings_win = None
+_settings_win_lock = threading.Lock()
+_client_lock = threading.Lock()
+
+# Snapshot of the API key used to build *_client* — lets us rebuild the
+# client if the key changes between hotkey invocations.
+_client_key = None
 
 
 # ── hide console window (Windows) ──────────────────────────────────────────
@@ -61,24 +64,31 @@ def _hide_console():
 # ── client management ──────────────────────────────────────────────────────
 
 def _get_client():
-    """Return the OpenAI client, creating it lazily if needed."""
-    global _client
-    if _client is None:
-        api_key = _security.load_api_key()
-        if not api_key:
-            # If key was cleared at runtime, try again
-            api_key = _security.prompt_api_key_gui()
+    """Return the OpenAI client, creating it lazily if needed.
+
+    Safe to call from any thread; uses a lock so concurrent hotkey triggers
+    don't create two clients.  If no API key is configured we do NOT pop a
+    tkinter dialog from a background thread — we just return None and let
+    the caller log/abort.  The GUI prompt only ever happens on the main
+    thread at startup.
+    """
+    global _client, _client_key
+    with _client_lock:
+        if _client is None:
+            api_key = _security.load_api_key()
             if not api_key:
-                sys.exit(0)
-            _security.save_api_key(api_key, logger=_logger.get_logger())
-        _client = OpenAI(api_key=api_key, base_url=BASE_URL)
-    return _client
+                return None
+            _client = OpenAI(api_key=api_key, base_url=BASE_URL)
+            _client_key = api_key
+        return _client
 
 
 def _reinit_client(new_key: str):
     """Called from settings GUI after user changes the API key."""
-    global _client
-    _client = OpenAI(api_key=new_key, base_url=BASE_URL)
+    global _client, _client_key
+    with _client_lock:
+        _client = OpenAI(api_key=new_key, base_url=BASE_URL)
+        _client_key = new_key
 
 
 # ── API call ───────────────────────────────────────────────────────────────
@@ -86,9 +96,12 @@ def _reinit_client(new_key: str):
 def _get_kaomoji(user_text: str) -> str:
     """Call DeepSeek to generate a kaomoji for *user_text*."""
     L = _logger.get_logger()
-    L.info(f"API 调用: 输入文本 \"{user_text}\"")
+    L.info(f"API 调用: 输入文本长度={len(user_text)}")
     try:
         client = _get_client()
+        if client is None:
+            L.error("API 调用失败: 未配置 API Key")
+            return ""
         response = client.chat.completions.create(
             model=MODEL,
             messages=[
@@ -100,10 +113,10 @@ def _get_kaomoji(user_text: str) -> str:
             timeout=10,
         )
         result = response.choices[0].message.content.strip()
-        L.info(f"API 返回: \"{result}\"")
+        L.info(f"API 返回: 长度={len(result)}")
         return result
     except Exception as exc:
-        L.error(f"API 调用失败: {exc}", exc_info=True)
+        L.error(f"API 调用失败: {exc}")
         return ""
 
 
@@ -168,27 +181,34 @@ def _show_settings():
 
     We launch tkinter from a dedicated daemon thread so it doesn't
     block the pystray message loop running on the main thread.  On
-    Windows tkinter works fine from a non-main thread.
+    Windows tkinter works fine from a non-main thread.  A lock prevents
+    double-creation when the tray icon is double-clicked quickly.
     """
     global _settings_win
 
-    if _settings_win is not None:
-        try:
-            _settings_win.show()
-            return
-        except Exception:
-            _settings_win = None
+    with _settings_win_lock:
+        if _settings_win is not None:
+            try:
+                _settings_win.show()
+                return
+            except Exception:
+                _settings_win = None
 
-    def _run_gui():
-        global _settings_win
-        cfg = _config._config_instance
-        gui_obj = _gui.SettingsWindow(cfg)
-        gui_obj._on_key_change = _reinit_client
-        _settings_win = gui_obj
-        gui_obj.run()
+        def _run_gui():
+            global _settings_win
+            cfg = _config._config_instance
+            gui_obj = _gui.SettingsWindow(cfg)
+            gui_obj._on_key_change = _reinit_client
+            with _settings_win_lock:
+                _settings_win = gui_obj
+            gui_obj.run()
+            # After mainloop exits (window destroyed), clear the reference.
+            with _settings_win_lock:
+                if _settings_win is gui_obj:
+                    _settings_win = None
 
-    t = threading.Thread(target=_run_gui, daemon=True)
-    t.start()
+        t = threading.Thread(target=_run_gui, daemon=True)
+        t.start()
 
 
 _quit_confirm_state = {"count": 0, "last": 0}
@@ -278,8 +298,8 @@ def main():
     _hotkey.set_callback(_handle_hotkey)
     _hotkey.start(cfg)
     L.info(
-        f"键盘监听已启动 (触发方式={cfg.get('trigger_type')},"
-        f" 启用={cfg.get('hotkey_enabled')})"
+        f"键盘监听已启动 (触发方式={cfg.get('trigger_type')},启用="
+        f"{cfg.get('hotkey_enabled')})"
     )
 
     # 6. Tray icon
