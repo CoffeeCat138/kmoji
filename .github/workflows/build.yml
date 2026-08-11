@@ -1,0 +1,28 @@
+# .github/workflows/build.yml
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [ main ]  # 当推送到 main 分支时触发
+  workflow_dispatch:    # 允许你从 GitHub 页面手动触发
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Package Application with PyInstaller
+      uses: sayyid5416/pyinstaller@v1
+      with:
+        spec: 'kmoji.py'
+        # 指定依赖文件
+        requirements: 'requirements.txt'
+        # PyInstaller 的额外选项，用逗号分隔
+        options: --onefile, --name "kmoji", --windowed
+        # 指定 Python 版本
+        python_ver: '3.10'
+        # 上传的 artifact 名称
+        upload_exe_with_name: 'kmoji'
