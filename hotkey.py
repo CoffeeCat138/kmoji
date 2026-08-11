@@ -125,7 +125,7 @@ def _press_window() -> float:
 def _update_runtime_config(config):
     """Pull hotkey settings from the Config instance."""
     global _enabled, _trigger_type, _custom_combo, _double_interval
-    global _WAKE_KEY, _MOD_KEYS, _custom_pressed_normal
+    global _WAKE_KEY, _MOD_KEYS, _custom_pressed_normal, _custom_combo_fired
 
     _enabled = config.get("hotkey_enabled", True)
     _trigger_type = config.get("trigger_type", "double_shift")

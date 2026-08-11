@@ -203,6 +203,39 @@ class SettingsWindow:
         spin.bind("<FocusOut>", lambda e: self._save_hotkey())
         self._interval_spin = spin
 
+    def _build_model(self):
+        f = ttk.Labelframe(self._page_model, text="模型设置", padding=10)
+        f.pack(fill=tk.X, padx=10, pady=10)
+
+        # -- API base URL --
+        url_frame = ttk.Frame(f)
+        url_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(url_frame, text="API 地址 (Base URL):").pack(side=tk.LEFT)
+        self._model_url_var = tk.StringVar(
+            value=self.cfg.get("base_url") or "https://api.deepseek.com"
+        )
+        url_entry = ttk.Entry(url_frame, textvariable=self._model_url_var, width=48)
+        url_entry.pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        url_entry.bind("<FocusOut>", lambda e: self._save_model())
+
+        # -- model name --
+        model_frame = ttk.Frame(f)
+        model_frame.pack(fill=tk.X)
+        ttk.Label(model_frame, text="模型名称:").pack(side=tk.LEFT)
+        self._model_var = tk.StringVar(
+            value=self.cfg.get("model") or "deepseek-v4-flash"
+        )
+        model_entry = ttk.Entry(model_frame, textvariable=self._model_var, width=48)
+        model_entry.pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        model_entry.bind("<FocusOut>", lambda e: self._save_model())
+
+        ttk.Label(
+            f,
+            text="支持任意 OpenAI 兼容接口（如 DeepSeek、本地 Ollama 等）。"
+            "修改后会自动重建客户端。",
+            foreground="gray",
+        ).pack(anchor=tk.W, pady=(8, 0))
+
     def _build_log(self):
         f = ttk.Labelframe(self._page_log, text="日志设置", padding=10)
         f.pack(fill=tk.X, padx=10, pady=10)
