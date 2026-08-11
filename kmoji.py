@@ -12,6 +12,8 @@ import sys
 import threading
 import time
 
+from openai import OpenAI
+
 import clipboard as _clipboard
 import config as _config
 import hotkey as _hotkey
