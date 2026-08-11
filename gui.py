@@ -97,16 +97,19 @@ class SettingsWindow:
 
         self._page_startup = ttk.Frame(nb)
         self._page_hotkey = ttk.Frame(nb)
+        self._page_model = ttk.Frame(nb)
         self._page_log = ttk.Frame(nb)
         self._page_apikey = ttk.Frame(nb)
 
         nb.add(self._page_startup, text="启动")
         nb.add(self._page_hotkey, text="快捷键")
+        nb.add(self._page_model, text="模型")
         nb.add(self._page_log, text="日志")
         nb.add(self._page_apikey, text="API Key")
 
         self._build_startup()
         self._build_hotkey()
+        self._build_model()
         self._build_log()
         self._build_apikey()
 
@@ -355,6 +358,15 @@ class SettingsWindow:
 
     # ── log actions ───────────────────────────────────────────────────
 
+    def _save_model(self, *_):
+        """Persist base_url and model, then rebuild the OpenAI client."""
+        url = (self._model_url_var.get() or "").strip()
+        model = (self._model_var.get() or "").strip()
+        self.cfg.set("base_url", url)
+        self.cfg.set("model", model)
+        if hasattr(self, "_on_api_config_change") and self._on_api_config_change:
+            self._on_api_config_change()
+
     def _save_log(self, *_):
         self.cfg.set("logging_enabled", self._log_enabled_var.get())
         self.cfg.set("log_level", self._log_level_var.get())
@@ -502,6 +514,9 @@ class SettingsWindow:
         self._apikey_label.configure(
             text=f"当前 Key: {_security_module.mask_key(current_key)}"
         )
+        # Refresh model page
+        self._model_url_var.set(self.cfg.get("base_url"))
+        self._model_var.set(self.cfg.get("model"))
         # Re-apply custom-combo widget enabled state
         if self._trigger_var.get() == "custom":
             self._custom_entry.configure(state="readonly")

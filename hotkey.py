@@ -84,8 +84,32 @@ _double_interval = 0.5
 # Non-modifier keys we've seen pressed (for custom combo detection)
 _custom_pressed_normal: set = set()
 
-_WAKE_KEY = None    # for double-tap: the pynput key to track
-_MOD_KEYS = set()   # for custom combo: the modifier keys to track
+_WAKE_KEY = None    # for double-tap: a set of pynput Key; for custom: lowercase str
+_MOD_KEYS = set()   # for custom combo: the modifier key base names to track
+
+
+def _normalize_key(key):
+    """Return a lowercase string for a pynput key, matching _WAKE_KEY.
+
+    - Char keys (a-z, 0-9, symbols): return lowercase char.
+    - Named keys (Key.f5 → "f5", Key.home → "home"): return name.lower().
+    - Returns None if the key cannot be normalised.
+    """
+    if hasattr(key, "char") and key.char is not None:
+        return key.char.lower()
+    if hasattr(key, "name") and key.name:
+        return key.name.lower()
+    return None
+
+
+def _key_matches_wake(key) -> bool:
+    """True if *key* matches the current _WAKE_KEY (custom or double-tap mode)."""
+    if _trigger_type in ("double_shift", "double_ctrl"):
+        # _WAKE_KEY is a set of pynput Key objects
+        return _WAKE_KEY and key in _WAKE_KEY
+    # custom mode: _WAKE_KEY is a lowercase string; compare normalised forms
+    norm = _normalize_key(key)
+    return _WAKE_KEY and norm == _WAKE_KEY
 
 
 def _press_window() -> float:
@@ -121,7 +145,7 @@ def _update_runtime_config(config):
         parsed = _parse_custom_combo(_custom_combo)
         if parsed:
             _MOD_KEYS = parsed[0]  # set of base modifier names ("ctrl"...)
-            _WAKE_KEY = parsed[1]  # the non-modifier key char
+            _WAKE_KEY = parsed[1].lower()  # normalized: "k", "f5", "home"
 
     _custom_pressed_normal = set()
     _press_times[:] = []
@@ -159,18 +183,18 @@ def _on_press(key):
                     _last_key_was_target = True
                     _custom_combo_fired = True
                     _fire()
-        elif hasattr(key, "char") and key.char == _WAKE_KEY:
+        elif _key_matches_wake(key):
             # Always track the normal key, even before modifiers arrive.
             # This lets modifiers arrive after the normal key (e.g. user
             # presses K first then Ctrl).  Plain K without modifiers
             # never fires because the condition gates on all modifiers.
-            _custom_pressed_normal.add(key.char)
+            _custom_pressed_normal.add(_normalize_key(key))
             if (_custom_press_cache == _MOD_KEYS
                     and not _custom_combo_fired):
                 _last_key_was_target = True
                 _custom_combo_fired = True
                 _fire()
-        else:
+        elif not is_mod:
             # Any other non-modifier key resets the normal-key set,
             # preventing a stale entry from earlier typing.
             _custom_pressed_normal.clear()
@@ -208,8 +232,8 @@ def _on_release(key):
             if not _custom_press_cache:
                 # All modifiers released — allow the combo to fire again.
                 _custom_combo_fired = False
-        elif hasattr(key, "char") and key.char == _WAKE_KEY:
-            _custom_pressed_normal.discard(key.char)
+        elif _key_matches_wake(key):
+            _custom_pressed_normal.discard(_normalize_key(key))
             if not _custom_pressed_normal:
                 # Normal key released — allow re-fire.
                 _custom_combo_fired = False

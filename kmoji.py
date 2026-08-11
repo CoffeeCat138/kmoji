@@ -24,13 +24,34 @@ import tray as _tray
 
 # ── constants ──────────────────────────────────────────────────────────────
 
-MODEL = "deepseek-v4-flash"
-BASE_URL = "https://api.deepseek.com"
+# Backwards-compatible defaults; overridable via config (base_url / model).
+DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MODEL = "deepseek-v4-flash"
 SYSTEM_PROMPT = (
     "你是可爱颜文字设计师。只输出根据用户文字情感定制的全新颜文字，"
     "不含任何其他内容，只能使用在iOS、安卓、Windows三端都能正常显示的符号，"
     "不输出解释、空格、换行。"
 )
+
+
+def _effective_base_url() -> str:
+    """Return configured base URL (falling back to the DeepSeek default)."""
+    cfg = _config._config_instance
+    if cfg is not None:
+        url = cfg.get("base_url") or DEFAULT_BASE_URL
+        if url.strip():
+            return url.strip()
+    return DEFAULT_BASE_URL
+
+
+def _effective_model() -> str:
+    """Return configured model name (falling back to the DeepSeek default)."""
+    cfg = _config._config_instance
+    if cfg is not None:
+        model = cfg.get("model") or DEFAULT_MODEL
+        if model.strip():
+            return model.strip()
+    return DEFAULT_MODEL
 
 # ── module-level state ─────────────────────────────────────────────────────
 # Plain globals (NOT thread-local): hotkey handler runs on daemon threads
@@ -41,9 +62,11 @@ _settings_win = None
 _settings_win_lock = threading.Lock()
 _client_lock = threading.Lock()
 
-# Snapshot of the API key used to build *_client* — lets us rebuild the
-# client if the key changes between hotkey invocations.
+# Snapshot of the API key/URL/model used to build *_client* — lets us rebuild
+# the client if any of them change between hotkey invocations.
 _client_key = None
+_client_base_url = None
+_client_model = None
 
 
 # ── hide console window (Windows) ──────────────────────────────────────────
@@ -77,27 +100,49 @@ def _get_client():
     Also detects when the stored API key has changed (e.g. via GUI), in
     which case the client is transparently rebuilt.
     """
-    global _client, _client_key
+    global _client, _client_key, _client_base_url, _client_model
     with _client_lock:
         api_key = _security.load_api_key()
         if not api_key:
             _client = None
             _client_key = None
             return None
-        if _client is not None and api_key == _client_key:
+        # Track URL+model too, so a config change also rebuilds the client.
+        base_url = _effective_base_url()
+        model = _effective_model()
+        if (_client is not None and api_key == _client_key
+                and _client_base_url == base_url and _client_model == model):
             return _client
-        # Key is new or client didn't exist — build fresh.
-        _client = OpenAI(api_key=api_key, base_url=BASE_URL)
+        # Key, URL or model changed / client didn't exist — build fresh.
+        _client = OpenAI(api_key=api_key, base_url=base_url)
         _client_key = api_key
+        _client_base_url = base_url
+        _client_model = model
         return _client
 
 
 def _reinit_client(new_key: str):
     """Called from settings GUI after user changes the API key."""
-    global _client, _client_key
+    global _client, _client_key, _client_base_url, _client_model
     with _client_lock:
-        _client = OpenAI(api_key=new_key, base_url=BASE_URL)
+        _client = OpenAI(
+            api_key=new_key,
+            base_url=_effective_base_url(),
+        )
         _client_key = new_key
+        _client_base_url = _effective_base_url()
+        _client_model = _effective_model()
+
+
+def _reinit_client_from_config():
+    """Called from settings GUI after URL/model config changes.
+
+    Re-reads the API key from storage and rebuilds the client with the
+    updated base_url / model from config.
+    """
+    api_key = _security.load_api_key()
+    if api_key:
+        _reinit_client(api_key)
 
 
 # ── API call ───────────────────────────────────────────────────────────────
@@ -112,7 +157,7 @@ def _get_kaomoji(user_text: str) -> str:
             L.error("API 调用失败: 未配置 API Key")
             return ""
         response = client.chat.completions.create(
-            model=MODEL,
+            model=_effective_model(),
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_text},
@@ -207,6 +252,7 @@ def _show_settings():
             cfg = _config._config_instance
             gui_obj = _gui.SettingsWindow(cfg)
             gui_obj._on_key_change = _reinit_client
+            gui_obj._on_api_config_change = _reinit_client_from_config
             with _settings_win_lock:
                 _settings_win = gui_obj
             gui_obj.run()
@@ -219,66 +265,16 @@ def _show_settings():
         t.start()
 
 
-_quit_confirm_state = {"count": 0, "last": 0}
-_quit_timer = None  # reference to the 3-second confirmation-reset Timer
-
-
 def _do_quit():
-    """Confirm-then-quit: click twice within 3 seconds, or cancel."""
-    global _quit_timer
-
-    now = time.time()
-    if _quit_confirm_state["count"] == 0 or (now - _quit_confirm_state["last"]) > 3:
-        _quit_confirm_state["count"] = 1
-        _quit_confirm_state["last"] = now
-
-        # Cancel any previous confirmation-reset timer before creating a new one.
-        if _quit_timer is not None:
-            _quit_timer.cancel()
-            _quit_timer = None
-
-        icon = _tray._tray_icon
-        if icon:
-            icon.title = "再次点击退出以确认退出"
-            icon.notify("请再次点击「退出」确认关闭 Kmoji")
-            t = threading.Timer(3.0, lambda: _reset_quit_confirm(icon))
-            t.daemon = True
-            t.start()
-            _quit_timer = t
-        return
-
-    # Second click — really quit
-    _logger.get_logger().info("用户确认退出")
+    """Quit immediately — no double-click confirmation needed."""
+    _logger.get_logger().info("用户选择退出")
     _shutdown()
-
-
-def _reset_quit_confirm(icon):
-    """Reset the quit-confirm state after the 3-second window expires."""
-    global _quit_timer
-    _quit_timer = None
-    _quit_confirm_state["count"] = 0
-    # Guard against icon already destroyed during shutdown.
-    if icon is not None:
-        try:
-            icon.title = _tray._build_tooltip(
-                _config._config_instance,
-                _config._config_instance.get("hotkey_enabled", True),
-            )
-            _tray.update_tray_tooltip(_config._config_instance)
-        except Exception:
-            pass
 
 
 def _shutdown():
     """Clean shutdown sequence."""
-    global _quit_timer
     L = _logger.get_logger()
     L.info("正在关闭…")
-
-    # Cancel any pending confirmation-reset timer.
-    if _quit_timer is not None:
-        _quit_timer.cancel()
-        _quit_timer = None
 
     _hotkey.stop()
     if _settings_win:
@@ -333,7 +329,10 @@ def main():
         _security.save_api_key(api_key, logger=L)
 
     # Initialise client eagerly so connection issues surface early
-    _client = OpenAI(api_key=api_key, base_url=BASE_URL)
+    _client = OpenAI(api_key=api_key, base_url=_effective_base_url())
+    _client_key = api_key
+    _client_base_url = _effective_base_url()
+    _client_model = _effective_model()
 
     # 5. Start hotkey listener
     _hotkey.set_callback(_handle_hotkey)

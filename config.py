@@ -17,6 +17,8 @@ DEFAULT_CONFIG = {
     "trigger_type": "double_shift",       # double_shift | double_ctrl | custom
     "custom_trigger": "",                 # e.g. "Ctrl+Shift+K", "Alt+J"
     "double_press_interval": 0.5,
+    "base_url": "https://api.deepseek.com",  # custom OpenAI-compatible API URL
+    "model": "deepseek-v4-flash",             # model name to use
     "logging_enabled": True,
     "log_level": "INFO",
     "log_path": "",                       # empty = use default
