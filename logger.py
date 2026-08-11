@@ -48,11 +48,8 @@ def init_logger(config):
 
 def _get_default_log_path():
     """Return the default log file path (shared with config module logic)."""
-    if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            return os.path.join(appdata, "kmoji", "kmoji.log")
-    return os.path.expanduser("~/.kmoji/kmoji.log")
+    import config as _cfg_module
+    return _cfg_module.get_default_log_path()
 
 
 def _apply_file_handler(config):

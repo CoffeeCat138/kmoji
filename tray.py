@@ -22,7 +22,6 @@ _ICON_HEIGHT = 64
 _ICON_WIDTH = 64
 
 _tray_icon = None
-_tray_menu_items = {}
 _tray_loop_done = threading.Event()
 
 
@@ -79,8 +78,7 @@ def _build_tooltip(config, enabled):
     return f"Kmoji 运行中 · 快捷键:{tr_name} · {state}"
 
 
-def _build_menu(config, enable_cb, toggle_enabled_cb,
-                show_settings_cb, quit_cb):
+def _build_menu(config, toggle_enabled_cb, show_settings_cb, quit_cb):
     """Return a pystray Menu."""
     from pystray import Menu, MenuItem
 
@@ -113,12 +111,7 @@ def create_tray(config, toggle_enabled_cb, show_settings_cb, quit_cb):
     global _tray_icon
 
     img = _make_icon_image()
-    menu = _build_menu(config, toggle_enabled_cb, toggle_enabled_cb,
-                       show_settings_cb, quit_cb)
-
-    def on_clicked(icon, item):
-        # Left-click → show settings (handled by menu default action)
-        pass
+    menu = _build_menu(config, toggle_enabled_cb, show_settings_cb, quit_cb)
 
     _tray_icon = pystray.Icon(
         "kmoji", img,
@@ -139,8 +132,7 @@ def update_tray_menu(config, toggle_enabled_cb, show_settings_cb, quit_cb):
     """Rebuild the tray menu (e.g. after toggling enabled)."""
     if _tray_icon:
         _tray_icon.menu = _build_menu(
-            config, toggle_enabled_cb, toggle_enabled_cb,
-            show_settings_cb, quit_cb,
+            config, toggle_enabled_cb, show_settings_cb, quit_cb,
         )
 
 

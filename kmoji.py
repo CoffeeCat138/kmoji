@@ -73,15 +73,22 @@ def _get_client():
     tkinter dialog from a background thread — we just return None and let
     the caller log/abort.  The GUI prompt only ever happens on the main
     thread at startup.
+
+    Also detects when the stored API key has changed (e.g. via GUI), in
+    which case the client is transparently rebuilt.
     """
     global _client, _client_key
     with _client_lock:
-        if _client is None:
-            api_key = _security.load_api_key()
-            if not api_key:
-                return None
-            _client = OpenAI(api_key=api_key, base_url=BASE_URL)
-            _client_key = api_key
+        api_key = _security.load_api_key()
+        if not api_key:
+            _client = None
+            _client_key = None
+            return None
+        if _client is not None and api_key == _client_key:
+            return _client
+        # Key is new or client didn't exist — build fresh.
+        _client = OpenAI(api_key=api_key, base_url=BASE_URL)
+        _client_key = api_key
         return _client
 
 
@@ -144,8 +151,7 @@ def _handle_hotkey():
         if not text:
             L.info("光标前无有效文字，跳过")
             return
-        L.info(f"提取文字: \"{text}\"")
-
+        L.info(f"提取文字: 长度={len(text)}")
         # Step 2: get kaomoji from API
         kaomoji = _get_kaomoji(text)
         if not kaomoji:
@@ -157,7 +163,7 @@ def _handle_hotkey():
         if ok:
             L.info("颜文字已粘贴")
     except Exception as exc:
-        L.error(f"处理快捷键时发生异常: {exc}", exc_info=True)
+        L.error(f"处理快捷键时发生异常: {type(exc).__name__}: {exc}")
     finally:
         _hotkey_lock.release()
 
@@ -214,22 +220,31 @@ def _show_settings():
 
 
 _quit_confirm_state = {"count": 0, "last": 0}
+_quit_timer = None  # reference to the 3-second confirmation-reset Timer
 
 
 def _do_quit():
     """Confirm-then-quit: click twice within 3 seconds, or cancel."""
+    global _quit_timer
+
     now = time.time()
     if _quit_confirm_state["count"] == 0 or (now - _quit_confirm_state["last"]) > 3:
         _quit_confirm_state["count"] = 1
         _quit_confirm_state["last"] = now
-        if _tray._tray_icon:
-            _tray._tray_icon.title = "再次点击退出以确认退出"
-            _tray._tray_icon.notify("请再次点击「退出」确认关闭 Kmoji")
-            t = threading.Timer(3.0, lambda: _tray.update_tray_tooltip(
-                _config._config_instance
-            ))
+
+        # Cancel any previous confirmation-reset timer before creating a new one.
+        if _quit_timer is not None:
+            _quit_timer.cancel()
+            _quit_timer = None
+
+        icon = _tray._tray_icon
+        if icon:
+            icon.title = "再次点击退出以确认退出"
+            icon.notify("请再次点击「退出」确认关闭 Kmoji")
+            t = threading.Timer(3.0, lambda: _reset_quit_confirm(icon))
             t.daemon = True
             t.start()
+            _quit_timer = t
         return
 
     # Second click — really quit
@@ -237,10 +252,34 @@ def _do_quit():
     _shutdown()
 
 
+def _reset_quit_confirm(icon):
+    """Reset the quit-confirm state after the 3-second window expires."""
+    global _quit_timer
+    _quit_timer = None
+    _quit_confirm_state["count"] = 0
+    # Guard against icon already destroyed during shutdown.
+    if icon is not None:
+        try:
+            icon.title = _tray._build_tooltip(
+                _config._config_instance,
+                _config._config_instance.get("hotkey_enabled", True),
+            )
+            _tray.update_tray_tooltip(_config._config_instance)
+        except Exception:
+            pass
+
+
 def _shutdown():
     """Clean shutdown sequence."""
+    global _quit_timer
     L = _logger.get_logger()
     L.info("正在关闭…")
+
+    # Cancel any pending confirmation-reset timer.
+    if _quit_timer is not None:
+        _quit_timer.cancel()
+        _quit_timer = None
+
     _hotkey.stop()
     if _settings_win:
         try:

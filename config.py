@@ -6,6 +6,11 @@ import json
 import os
 import sys
 
+# Injected by kmoji.main() at startup so tray/GUI callbacks can reach the
+# live Config instance without circular imports.  Declared here (None) so
+# early access before injection fails gracefully instead of AttributeError.
+_config_instance = None
+
 
 DEFAULT_CONFIG = {
     "hotkey_enabled": True,

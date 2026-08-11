@@ -14,9 +14,6 @@ import unicodedata
 from pynput import keyboard as pynput_keyboard
 
 
-_DOUBLE_PRESS_RECENT_SECONDS = 0.2  # keep last press for this long max (seconds)
-
-
 # ── callback registry ──────────────────────────────────────────────────────
 _on_trigger = None
 
@@ -77,6 +74,7 @@ _listener = None
 _press_times: list[float] = []
 _custom_press_cache: set = set()
 _last_key_was_target = False
+_custom_combo_fired = False  # debounce: combo already fired this hold
 
 _enabled = True
 _trigger_type = "double_shift"
@@ -88,6 +86,16 @@ _custom_pressed_normal: set = set()
 
 _WAKE_KEY = None    # for double-tap: the pynput key to track
 _MOD_KEYS = set()   # for custom combo: the modifier keys to track
+
+
+def _press_window() -> float:
+    """How long (seconds) a recorded press is kept before it is dropped.
+
+    Must be at least as large as the configured double-tap interval, otherwise
+    a second press within the configured interval would find the first press
+    already evicted and the double-tap would never fire.
+    """
+    return max(0.5, _double_interval * 2.0)
 
 
 def _update_runtime_config(config):
@@ -118,6 +126,7 @@ def _update_runtime_config(config):
     _custom_pressed_normal = set()
     _press_times[:] = []
     _custom_press_cache.clear()
+    _custom_combo_fired = False
 
 
 def update_config(config):
@@ -129,7 +138,7 @@ def update_config(config):
 
 def _on_press(key):
     global _press_times, _last_key_was_target, _custom_press_cache
-    global _custom_pressed_normal
+    global _custom_pressed_normal, _custom_combo_fired
 
     if not _enabled:
         return
@@ -142,23 +151,38 @@ def _on_press(key):
             base = key.name.replace("_l", "").replace("_r", "")
             if base in _MOD_KEYS:
                 _custom_press_cache.add(base)
+                # Modifier arrived — if the normal key is already tracked
+                # (user pressed K first, then Ctrl), fire now.
+                if (_custom_press_cache == _MOD_KEYS
+                        and _WAKE_KEY in _custom_pressed_normal
+                        and not _custom_combo_fired):
+                    _last_key_was_target = True
+                    _custom_combo_fired = True
+                    _fire()
         elif hasattr(key, "char") and key.char == _WAKE_KEY:
+            # Always track the normal key, even before modifiers arrive.
+            # This lets modifiers arrive after the normal key (e.g. user
+            # presses K first then Ctrl).  Plain K without modifiers
+            # never fires because the condition gates on all modifiers.
             _custom_pressed_normal.add(key.char)
-        # Fire when all modifiers + the main key are held together
-        if (_custom_press_cache == _MOD_KEYS
-                and _WAKE_KEY in _custom_pressed_normal):
-            _last_key_was_target = True
-            _fire()
-            _custom_pressed_normal.discard(_WAKE_KEY)
+            if (_custom_press_cache == _MOD_KEYS
+                    and not _custom_combo_fired):
+                _last_key_was_target = True
+                _custom_combo_fired = True
+                _fire()
+        else:
+            # Any other non-modifier key resets the normal-key set,
+            # preventing a stale entry from earlier typing.
+            _custom_pressed_normal.clear()
         return
 
     # ── double-tap mode (shift / ctrl) ──
     if _WAKE_KEY and key in _WAKE_KEY:
         now = time.time()
-        # Keep only presses within a generous recent window
+        # Keep only presses within the configured interval window
         _press_times = [
             t for t in _press_times
-            if now - t < _DOUBLE_PRESS_RECENT_SECONDS
+            if now - t < _press_window()
         ]
         _press_times.append(now)
         _last_key_was_target = True
@@ -170,7 +194,7 @@ def _on_press(key):
 
 def _on_release(key):
     global _press_times, _last_key_was_target, _custom_press_cache
-    global _custom_pressed_normal
+    global _custom_pressed_normal, _custom_combo_fired
 
     if not _enabled:
         return
@@ -181,8 +205,14 @@ def _on_release(key):
         if is_mod:
             base = key.name.replace("_l", "").replace("_r", "")
             _custom_press_cache.discard(base)
+            if not _custom_press_cache:
+                # All modifiers released — allow the combo to fire again.
+                _custom_combo_fired = False
         elif hasattr(key, "char") and key.char == _WAKE_KEY:
             _custom_pressed_normal.discard(key.char)
+            if not _custom_pressed_normal:
+                # Normal key released — allow re-fire.
+                _custom_combo_fired = False
         return
 
     # ── double-tap mode ──
@@ -199,7 +229,15 @@ def _on_release(key):
 
 
 def _fire():
-    """Dispatch trigger callback on a daemon thread."""
+    """Dispatch trigger callback on a daemon thread.
+
+    Note: This always spawns a new thread even if the previous trigger
+    handler is still running.  Callers should implement their own lock
+    / throttle to guard against re-entrancy (kmoji.py uses
+    ``_hotkey_lock`` which is checked inside the callback itself).
+    We intentionally do NOT gate on the caller's lock here because
+    hotkey.py has no knowledge of the callback's locking strategy.
+    """
     if _on_trigger is None:
         return
     threading.Thread(target=_on_trigger, daemon=True).start()

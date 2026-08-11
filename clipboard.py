@@ -6,19 +6,23 @@ Implements:
 """
 import ctypes
 import sys
+import threading
 import time
 
 import pyperclip
 from pynput import keyboard as pynput_keyboard
 
 _LOGGER = None
+_logger_lock = threading.Lock()
 
 
 def _get_logger():
     global _LOGGER
     if _LOGGER is None:
-        import logger as _log
-        _LOGGER = _log.get_logger()
+        with _logger_lock:
+            if _LOGGER is None:
+                import logger as _log
+                _LOGGER = _log.get_logger()
     return _LOGGER
 
 
@@ -78,6 +82,12 @@ def select_text_from_cursor_to_home():
     Returns the selected text (from clipboard) or empty string.
     Mitigates TOCTOU by performing the copy and immediately reading back.
     The user's original clipboard is ALWAYS restored, even on error.
+
+    Cursor preservation: Shift+Home selects from cursor to line-start.
+    A single Right-arrow press after deselecting moves cursor from
+    line-start back to (original cursor) line-start+1 — the first
+    character after the selection.  This correctly restores the
+    original cursor position (the one right after the selected text).
     """
     L = _get_logger()
     old = _paste_safe()
@@ -85,28 +95,28 @@ def select_text_from_cursor_to_home():
     try:
         kb = pynput_keyboard.Controller()
 
-        # Select from cursor to line start
-        kb.press(pynput_keyboard.Key.ctrl_l)
-        kb.press(pynput_keyboard.Key.shift_l)
+        # Select from cursor to line start (Shift+Home)
+        kb.press(pynput_keyboard.Key.shift)
         kb.press(pynput_keyboard.Key.home)
         kb.release(pynput_keyboard.Key.home)
-        kb.release(pynput_keyboard.Key.shift_l)
-        kb.release(pynput_keyboard.Key.ctrl_l)
+        kb.release(pynput_keyboard.Key.shift)
 
         time.sleep(0.03)  # minimal wait for selection
 
         # Copy
-        kb.press(pynput_keyboard.Key.ctrl_l)
+        kb.press(pynput_keyboard.Key.ctrl)
         kb.press("c")
         kb.release("c")
-        kb.release(pynput_keyboard.Key.ctrl_l)
+        kb.release(pynput_keyboard.Key.ctrl)
 
         time.sleep(0.03)
 
         # Read what we copied
         selected = _paste_safe()
 
-        # Move cursor back to end of selection (Right arrow)
+        # Move cursor back to end of selection (Right arrow).
+        # With Shift+Home: cursor is at line-start after deselect;
+        # Right moves back to the original position (start+1).
         kb.press(pynput_keyboard.Key.right)
         kb.release(pynput_keyboard.Key.right)
         time.sleep(0.02)

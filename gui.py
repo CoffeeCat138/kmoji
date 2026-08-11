@@ -8,6 +8,7 @@ Provides:
 - Logging settings (enabled, level, path, open-dir, recent-logs)
 - API Key management (masked display, re-enter, clear)
 """
+import os
 import subprocess
 import sys
 import tkinter as tk
@@ -47,20 +48,24 @@ def _startup_set(enable: bool):
         return
     import winreg
     try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STARTUP_KEY, 0,
-                             winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE)
-    except FileNotFoundError:
-        key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, _STARTUP_KEY)
-
-    if enable:
-        exe_path = os.path.abspath(sys.executable)
-        winreg.SetValueEx(key, _STARTUP_VALUE, 0, winreg.REG_SZ, exe_path)
-    else:
         try:
-            winreg.DeleteValue(key, _STARTUP_VALUE)
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STARTUP_KEY, 0,
+                                 winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE)
         except FileNotFoundError:
-            pass
-    key.Close()
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, _STARTUP_KEY)
+
+        if enable:
+            exe_path = os.path.abspath(sys.executable)
+            winreg.SetValueEx(key, _STARTUP_VALUE, 0, winreg.REG_SZ, exe_path)
+        else:
+            try:
+                winreg.DeleteValue(key, _STARTUP_VALUE)
+            except FileNotFoundError:
+                pass
+        key.Close()
+    except Exception as e:
+        print(f"[Kmoji] 开机自启动设置失败: {e}")
+        messagebox.showerror("开机自启动", f"设置开机自启动失败:\n{e}")
 
 
 # ── Main window ────────────────────────────────────────────────────────────
@@ -383,8 +388,64 @@ class SettingsWindow:
 
     # ── API Key actions ───────────────────────────────────────────────
 
+    def _prompt_key_dialog(self):
+        """Show an inline API-key input dialog as a child Toplevel.
+
+        Uses self.root as parent so we avoid creating a second Tk()
+        instance, which would conflict with the existing mainloop.
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title("API Key 配置")
+        dialog.attributes("-topmost", True)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        dialog.update_idletasks()
+        width, height = 420, 130
+        screen_w = dialog.winfo_screenwidth()
+        screen_h = dialog.winfo_screenheight()
+        x = (screen_w - width) // 2
+        y = (screen_h - height) // 2
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+
+        tk.Label(
+            dialog, text="请输入您的 DeepSeek API Key:", font=("微软雅黑", 10)
+        ).pack(pady=(12, 5))
+
+        entry_var = tk.StringVar()
+        entry = tk.Entry(
+            dialog, textvariable=entry_var, show="*", width=44,
+            font=("Consolas", 10)
+        )
+        entry.pack(pady=5)
+        entry.focus_set()
+
+        result = [None]
+
+        def on_ok():
+            result[0] = entry_var.get().strip()
+            dialog.destroy()
+
+        def on_cancel():
+            result[0] = None
+            dialog.destroy()
+
+        btn_frame = tk.Frame(dialog)
+        btn_frame.pack(pady=10)
+        tk.Button(btn_frame, text="确定", width=10, command=on_ok).pack(
+            side=tk.LEFT, padx=10
+        )
+        tk.Button(btn_frame, text="取消", width=10, command=on_cancel).pack(
+            side=tk.LEFT, padx=10
+        )
+
+        dialog.bind("<Return>", lambda e: on_ok())
+        dialog.bind("<Escape>", lambda e: on_cancel())
+
+        self.root.wait_window(dialog)
+        return result[0]
+
     def _re_enter_key(self):
-        new_key = _security_module.prompt_api_key_gui()
+        new_key = self._prompt_key_dialog()
         if new_key:
             _security_module.save_api_key(new_key, logger=_logger_module.get_logger())
             masked = _security_module.mask_key(new_key)
