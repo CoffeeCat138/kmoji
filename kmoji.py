@@ -1,266 +1,324 @@
-import os
+"""Kmoji — Kaomoji (颜文字) input tool for Windows.
+
+Double-tap Shift (or customisable hotkey) → select text behind cursor →
+call DeepSeek API for kaomoji → paste via Ctrl+V.
+
+Usage:
+    python kmoji.py               # normal (background, tray icon)
+    python kmoji.py --test | -t   # debug mode (console output)
+    python kmoji.py --settings    # open settings window and exit
+"""
 import sys
-import subprocess
 import threading
 import time
-import unicodedata
-import ctypes
-import tkinter as tk
-import winreg
 
-from pynput import keyboard as pynput_keyboard
-import pyperclip
-from openai import OpenAI
+import clipboard as _clipboard
+import config as _config
+import hotkey as _hotkey
+import logger as _logger
+import security as _security
+import gui as _gui
+import tray as _tray
 
-ENV_VAR_NAME = "DEEPSEEK_API_KEY"
+# ── constants ──────────────────────────────────────────────────────────────
+
 MODEL = "deepseek-v4-flash"
 BASE_URL = "https://api.deepseek.com"
-DOUBLE_PRESS_INTERVAL = 0.5
-STARTUP_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-STARTUP_VALUE_NAME = "kmoji"
+SYSTEM_PROMPT = (
+    "你是可爱颜文字设计师。只输出根据用户文字情感定制的全新颜文字，"
+    "不含任何其他内容，只能使用在iOS、安卓、Windows三端都能正常显示的符号，"
+    "不输出解释、空格、换行。"
+)
 
-SYSTEM_PROMPT = """你是可爱颜文字设计师。只输出根据用户文字情感定制的全新颜文字，不含任何其他内容，只能使用在iOS、安卓、Windows三端都能正常显示的符号，不输出解释、空格、换行。"""
+# ── module-level state ─────────────────────────────────────────────────────
+# Plain globals (NOT thread-local): hotkey handler runs on daemon threads
+# but needs access to the same client and settings window references.
 
-api_key = None
-client = None
-hotkey_lock = threading.Lock()
-DEBUG = False
+_client = None
+_settings_win = None
+_settings_win_lock = threading.Lock()
+_client_lock = threading.Lock()
 
-shift_press_times = []
-last_key_was_shift = False
-listener = None
+# Snapshot of the API key used to build *_client* — lets us rebuild the
+# client if the key changes between hotkey invocations.
+_client_key = None
 
-def log(msg):
-    if DEBUG:
-        print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
-def hide_console():
-    if sys.platform == "win32":
-        try:
-            kernel32 = ctypes.windll.kernel32
-            user32 = ctypes.windll.user32
-            hwnd = kernel32.GetConsoleWindow()
-            if hwnd:
-                user32.ShowWindow(hwnd, 0)
-        except:
-            pass
+# ── hide console window (Windows) ──────────────────────────────────────────
 
-def add_to_startup():
-    try:
-        exe_path = os.path.abspath(sys.executable)
-        if not os.path.isfile(exe_path):
-            log("无法获取可执行文件路径，跳过自启动注册")
-            return
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG_KEY, 0, winreg.KEY_READ) as key:
-            try:
-                existing, _ = winreg.QueryValueEx(key, STARTUP_VALUE_NAME)
-                if os.path.normcase(existing) == os.path.normcase(exe_path):
-                    log("自启动项已存在，无需重复添加")
-                    return
-            except FileNotFoundError:
-                pass
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_REG_KEY, 0, winreg.KEY_SET_VALUE) as key:
-            winreg.SetValueEx(key, STARTUP_VALUE_NAME, 0, winreg.REG_SZ, exe_path)
-            log("已添加至开机自启动")
-    except Exception as e:
-        log(f"添加自启动失败: {e}")
-
-def get_api_key_from_user():
-    root = tk.Tk()
-    root.withdraw()
-    dialog = tk.Toplevel(root)
-    dialog.title("API Key 配置")
-    dialog.attributes('-topmost', True)
-    dialog.resizable(False, False)
-    dialog.update_idletasks()
-    width, height = 400, 120
-    screen_w = dialog.winfo_screenwidth()
-    screen_h = dialog.winfo_screenheight()
-    x = (screen_w - width) // 2
-    y = (screen_h - height) // 2
-    dialog.geometry(f"{width}x{height}+{x}+{y}")
-    dialog.grab_set()
-
-    tk.Label(dialog, text="请输入您的 DeepSeek API Key:", font=("微软雅黑", 10)).pack(pady=(12, 5))
-    entry_var = tk.StringVar()
-    entry = tk.Entry(dialog, textvariable=entry_var, show="*", width=40, font=("Consolas", 10))
-    entry.pack(pady=5)
-    entry.focus_set()
-
-    result = [None]
-
-    def on_ok():
-        result[0] = entry_var.get().strip()
-        dialog.destroy()
-
-    def on_cancel():
-        result[0] = None
-        dialog.destroy()
-
-    btn_frame = tk.Frame(dialog)
-    btn_frame.pack(pady=10)
-    tk.Button(btn_frame, text="确定", width=10, command=on_ok).pack(side=tk.LEFT, padx=10)
-    tk.Button(btn_frame, text="取消", width=10, command=on_cancel).pack(side=tk.LEFT, padx=10)
-    dialog.bind('<Return>', lambda e: on_ok())
-    dialog.bind('<Escape>', lambda e: on_cancel())
-
-    root.wait_window(dialog)
-    root.destroy()
-    return result[0]
-
-def ensure_api_key():
-    global api_key, client
-    api_key = os.environ.get(ENV_VAR_NAME)
-    if api_key:
+def _hide_console():
+    """Hide the terminal window when not in debug mode."""
+    if sys.platform != "win32":
         return
-    api_key = get_api_key_from_user()
-    if not api_key:
-        sys.exit(0)
-    os.environ[ENV_VAR_NAME] = api_key
-    if sys.platform == "win32":
-        try:
-            subprocess.run(["setx", ENV_VAR_NAME, api_key], capture_output=True, check=True)
-        except:
-            pass
-
-def init_client():
-    global client, api_key
-    client = OpenAI(api_key=api_key, base_url=BASE_URL)
-
-def get_kaomoji(user_text: str) -> str:
     try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+        hwnd = kernel32.GetConsoleWindow()
+        if hwnd:
+            user32.ShowWindow(hwnd, 0)
+    except Exception:
+        pass  # best-effort
+
+
+# ── client management ──────────────────────────────────────────────────────
+
+def _get_client():
+    """Return the OpenAI client, creating it lazily if needed.
+
+    Safe to call from any thread; uses a lock so concurrent hotkey triggers
+    don't create two clients.  If no API key is configured we do NOT pop a
+    tkinter dialog from a background thread — we just return None and let
+    the caller log/abort.  The GUI prompt only ever happens on the main
+    thread at startup.
+    """
+    global _client, _client_key
+    with _client_lock:
+        if _client is None:
+            api_key = _security.load_api_key()
+            if not api_key:
+                return None
+            _client = OpenAI(api_key=api_key, base_url=BASE_URL)
+            _client_key = api_key
+        return _client
+
+
+def _reinit_client(new_key: str):
+    """Called from settings GUI after user changes the API key."""
+    global _client, _client_key
+    with _client_lock:
+        _client = OpenAI(api_key=new_key, base_url=BASE_URL)
+        _client_key = new_key
+
+
+# ── API call ───────────────────────────────────────────────────────────────
+
+def _get_kaomoji(user_text: str) -> str:
+    """Call DeepSeek to generate a kaomoji for *user_text*."""
+    L = _logger.get_logger()
+    L.info(f"API 调用: 输入文本长度={len(user_text)}")
+    try:
+        client = _get_client()
+        if client is None:
+            L.error("API 调用失败: 未配置 API Key")
+            return ""
         response = client.chat.completions.create(
             model=MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_text}
+                {"role": "user", "content": user_text},
             ],
             stream=False,
             extra_body={"thinking": {"type": "disabled"}},
-            timeout=10
+            timeout=10,
         )
-        return response.choices[0].message.content.strip()
-    except:
+        result = response.choices[0].message.content.strip()
+        L.info(f"API 返回: 长度={len(result)}")
+        return result
+    except Exception as exc:
+        L.error(f"API 调用失败: {exc}")
         return ""
 
-def is_punctuation(char):
-    return unicodedata.category(char).startswith('P')
 
-def extract_from_cursor_prefix(prefix):
-    for i in range(len(prefix) - 1, -1, -1):
-        if is_punctuation(prefix[i]):
-            return prefix[i + 1:]
-    return prefix
+# ── hotkey handler ─────────────────────────────────────────────────────────
 
-def safe_get_prefix():
-    try:
-        old = pyperclip.paste()
-    except:
-        old = ''
-    kb_ctrl = pynput_keyboard.Controller()
-    kb_ctrl.press(pynput_keyboard.Key.ctrl_l)
-    kb_ctrl.press(pynput_keyboard.Key.shift_l)
-    kb_ctrl.press(pynput_keyboard.Key.home)
-    kb_ctrl.release(pynput_keyboard.Key.home)
-    kb_ctrl.release(pynput_keyboard.Key.shift_l)
-    kb_ctrl.release(pynput_keyboard.Key.ctrl_l)
-    time.sleep(0.05)
-    kb_ctrl.press(pynput_keyboard.Key.ctrl_l)
-    kb_ctrl.press('c')
-    kb_ctrl.release('c')
-    kb_ctrl.release(pynput_keyboard.Key.ctrl_l)
-    time.sleep(0.05)
-    try:
-        prefix = pyperclip.paste()
-    except:
-        prefix = ''
-    kb_ctrl.press(pynput_keyboard.Key.right)
-    kb_ctrl.release(pynput_keyboard.Key.right)
-    time.sleep(0.02)
-    try:
-        pyperclip.copy(old)
-    except:
-        pass
-    return prefix
+# Lock to prevent re-entrant hotkey triggers while an API call is in-flight.
+_hotkey_lock = threading.Lock()
 
-def handle_hotkey():
-    if not hotkey_lock.acquire(blocking=False):
+
+def _handle_hotkey():
+    """Called when the configured hotkey is triggered."""
+    L = _logger.get_logger()
+    L.info("快捷键触发")
+
+    if not _hotkey_lock.acquire(blocking=False):
+        L.info("上一次快捷键尚未完成，忽略本次触发")
         return
+
     try:
-        prefix = safe_get_prefix()
-        text = extract_from_cursor_prefix(prefix)
+        # Step 1: extract text from cursor position
+        full_text, trigger_hwnd = _clipboard.extract_prefix()
+        text = _hotkey.extract_from_cursor_prefix(full_text)
         if not text:
+            L.info("光标前无有效文字，跳过")
             return
-        kaomoji = get_kaomoji(text)
+        L.info(f"提取文字: \"{text}\"")
+
+        # Step 2: get kaomoji from API
+        kaomoji = _get_kaomoji(text)
         if not kaomoji:
+            L.info("API 未返回有效颜文字，跳过")
             return
-        try:
-            old = pyperclip.paste()
-        except:
-            old = ''
-        try:
-            pyperclip.copy(kaomoji)
-            time.sleep(0.02)
-            kb_ctrl = pynput_keyboard.Controller()
-            kb_ctrl.press(pynput_keyboard.Key.ctrl_l)
-            kb_ctrl.press('v')
-            kb_ctrl.release('v')
-            kb_ctrl.release(pynput_keyboard.Key.ctrl_l)
-            time.sleep(0.02)
-        finally:
-            try:
-                pyperclip.copy(old)
-            except:
-                pass
-    except:
-        pass
+
+        # Step 3: paste, but only if foreground window hasn't changed
+        ok = _clipboard.paste_kaomoji(kaomoji, expected_hwnd=trigger_hwnd)
+        if ok:
+            L.info("颜文字已粘贴")
+    except Exception as exc:
+        L.error(f"处理快捷键时发生异常: {exc}", exc_info=True)
     finally:
-        hotkey_lock.release()
+        _hotkey_lock.release()
 
-def on_press(key):
-    global shift_press_times, last_key_was_shift
-    if key in (pynput_keyboard.Key.shift, pynput_keyboard.Key.shift_l, pynput_keyboard.Key.shift_r):
-        now = time.time()
-        shift_press_times.append(now)
-        if len(shift_press_times) > 2:
-            shift_press_times = shift_press_times[-2:]
-        last_key_was_shift = True
-    else:
-        shift_press_times.clear()
-        last_key_was_shift = False
 
-def on_release(key):
-    global shift_press_times, last_key_was_shift
-    if key in (pynput_keyboard.Key.shift, pynput_keyboard.Key.shift_l, pynput_keyboard.Key.shift_r):
-        if (len(shift_press_times) == 2 and 
-            last_key_was_shift and
-            (shift_press_times[1] - shift_press_times[0]) <= DOUBLE_PRESS_INTERVAL):
-            log("双击 Shift 触发")
-            threading.Thread(target=handle_hotkey, daemon=True).start()
-        last_key_was_shift = False
+# ── tray callbacks ─────────────────────────────────────────────────────────
+
+def _toggle_enabled():
+    """Toggle hotkey enabled flag and update tray + GUI."""
+    cfg = _config._config_instance
+    current = cfg.get("hotkey_enabled", True)
+    cfg.set("hotkey_enabled", not current)
+    _hotkey.update_config(cfg)
+    _tray.update_tray_tooltip(cfg)
+    _tray.update_tray_menu(
+        cfg, _toggle_enabled, _show_settings, _do_quit
+    )
+    L = _logger.get_logger()
+    L.info(f"快捷键已{'禁用' if current else '启用'}")
+
+
+def _show_settings():
+    """Show (or create) the settings window.
+
+    We launch tkinter from a dedicated daemon thread so it doesn't
+    block the pystray message loop running on the main thread.  On
+    Windows tkinter works fine from a non-main thread.  A lock prevents
+    double-creation when the tray icon is double-clicked quickly.
+    """
+    global _settings_win
+
+    with _settings_win_lock:
+        if _settings_win is not None:
+            try:
+                _settings_win.show()
+                return
+            except Exception:
+                _settings_win = None
+
+        def _run_gui():
+            global _settings_win
+            cfg = _config._config_instance
+            gui_obj = _gui.SettingsWindow(cfg)
+            gui_obj._on_key_change = _reinit_client
+            with _settings_win_lock:
+                _settings_win = gui_obj
+            gui_obj.run()
+            # After mainloop exits (window destroyed), clear the reference.
+            with _settings_win_lock:
+                if _settings_win is gui_obj:
+                    _settings_win = None
+
+        t = threading.Thread(target=_run_gui, daemon=True)
+        t.start()
+
+
+_quit_confirm_state = {"count": 0, "last": 0}
+
+
+def _do_quit():
+    """Confirm-then-quit: click twice within 3 seconds, or cancel."""
+    now = time.time()
+    if _quit_confirm_state["count"] == 0 or (now - _quit_confirm_state["last"]) > 3:
+        _quit_confirm_state["count"] = 1
+        _quit_confirm_state["last"] = now
+        if _tray._tray_icon:
+            _tray._tray_icon.title = "再次点击退出以确认退出"
+            _tray._tray_icon.notify("请再次点击「退出」确认关闭 Kmoji")
+            t = threading.Timer(3.0, lambda: _tray.update_tray_tooltip(
+                _config._config_instance
+            ))
+            t.daemon = True
+            t.start()
+        return
+
+    # Second click — really quit
+    _logger.get_logger().info("用户确认退出")
+    _shutdown()
+
+
+def _shutdown():
+    """Clean shutdown sequence."""
+    L = _logger.get_logger()
+    L.info("正在关闭…")
+    _hotkey.stop()
+    if _settings_win:
+        try:
+            _settings_win.destroy()
+        except Exception:
+            pass
+    _logger.log_shutdown()
+    _tray.stop_tray()
+
+
+# ── main ───────────────────────────────────────────────────────────────────
 
 def main():
-    global DEBUG, listener
-    if "-t" in sys.argv or "--test" in sys.argv:
-        DEBUG = True
-        print("调试模式已开启，日志将输出到控制台。")
+    """Application entry point."""
+    global _client
 
-    if not DEBUG:
-        hide_console()
+    # Parse flags
+    debug_mode = "-t" in sys.argv or "--test" in sys.argv
 
-    add_to_startup()
-
-    ensure_api_key()
-    if not api_key:
+    if "--settings" in sys.argv:
+        # Just open settings and exit (useful for shortcuts)
+        cfg = _config.Config()
+        _logger.init_logger(cfg)
+        gui_obj = _gui.SettingsWindow(cfg)
+        gui_obj.run()
         return
 
-    init_client()
+    # 1. Config
+    cfg = _config.Config()
+    # Expose globally so tray callbacks can reach it without circular imports
+    _config._config_instance = cfg
 
-    log("启动双击 Shift 监听...")
-    listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
-    listener.start()
-    log("服务已启动，等待双击 Shift...")
-    listener.join()
+    # 2. Logger
+    _logger.init_logger(cfg)
+    _logger.log_startup()
+    L = _logger.get_logger()
+
+    # 3. Hide console (non-debug)
+    if not debug_mode:
+        _hide_console()
+
+    # 4. API Key
+    api_key = _security.load_api_key()
+    if not api_key:
+        L.info("未找到 API Key，弹出输入窗口…")
+        api_key = _security.prompt_api_key_gui()
+        if not api_key:
+            L.warning("未提供 API Key，退出")
+            _logger.log_shutdown()
+            sys.exit(0)
+        _security.save_api_key(api_key, logger=L)
+
+    # Initialise client eagerly so connection issues surface early
+    _client = OpenAI(api_key=api_key, base_url=BASE_URL)
+
+    # 5. Start hotkey listener
+    _hotkey.set_callback(_handle_hotkey)
+    _hotkey.start(cfg)
+    L.info(
+        f"键盘监听已启动 (触发方式={cfg.get('trigger_type')},启用="
+        f"{cfg.get('hotkey_enabled')})"
+    )
+
+    # 6. Tray icon
+    _tray.create_tray(
+        cfg,
+        toggle_enabled_cb=_toggle_enabled,
+        show_settings_cb=_show_settings,
+        quit_cb=_do_quit,
+    )
+
+    # 7. Enter tray loop (blocking — main thread)
+    L.info("系统托盘已就绪")
+    try:
+        _tray.run_tray()
+    except KeyboardInterrupt:
+        L.info("捕获到 KeyboardInterrupt")
+    finally:
+        _shutdown()
+
 
 if __name__ == "__main__":
     main()
