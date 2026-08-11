@@ -1,3 +1,4 @@
+forked from ACwyz/kmoji
 # Kmoji — Kaomoji（颜文字）输入工具
 
 一个 Windows 平台的智能颜文字输入工具：通过快捷键触发，取光标前文本，调用 DeepSeek API 生成匹配的颜文字，并自动粘贴到光标位置。
