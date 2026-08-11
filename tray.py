@@ -96,7 +96,7 @@ def _build_menu(config, enable_cb, toggle_enabled_cb,
     return Menu(
         MenuItem("设置", _settings, default=True),
         MenuItem(
-            lambda: "✓ 快捷键已启用" if config.get("hotkey_enabled")
+            lambda _: "✓ 快捷键已启用" if config.get("hotkey_enabled")
             else "   快捷键已禁用",
             _toggle,
         ),
