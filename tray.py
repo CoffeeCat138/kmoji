@@ -22,7 +22,6 @@ _ICON_HEIGHT = 64
 _ICON_WIDTH = 64
 
 _tray_icon = None
-_tray_loop_done = threading.Event()
 
 
 # ── icon drawing ───────────────────────────────────────────────────────────
@@ -71,7 +70,6 @@ def _build_tooltip(config, enabled):
     trigger_names = {
         "double_shift": "双击Shift",
         "double_ctrl": "双击Ctrl",
-        "custom": config.get("custom_trigger", "自定义"),
     }
     tr_name = trigger_names.get(trigger, trigger)
     state = "已启用" if enabled else "已禁用"
@@ -94,8 +92,8 @@ def _build_menu(config, toggle_enabled_cb, show_settings_cb, quit_cb):
     return Menu(
         MenuItem("设置", _settings, default=True),
         MenuItem(
-            lambda _: "✓ 快捷键已启用" if config.get("hotkey_enabled")
-            else "   快捷键已禁用",
+            lambda _: "✓ 已启用" if config.get("hotkey_enabled")
+            else "   已禁用",
             _toggle,
         ),
         Menu.SEPARATOR,
@@ -138,14 +136,42 @@ def update_tray_menu(config, toggle_enabled_cb, show_settings_cb, quit_cb):
 
 def run_tray():
     """Enter the pystray main loop (BLOCKING). Must be called from main thread."""
-    global _tray_loop_done
-    _tray_loop_done.clear()
     if _tray_icon:
         _tray_icon.run()
-    _tray_loop_done.set()
 
 
 def stop_tray():
-    """Stop the tray loop from another thread."""
+    """Stop the tray loop from another thread.
+
+    IMPORTANT: Never call this from inside a pystray menu callback or from
+    the same thread that is running run_tray() — that will deadlock.
+    Prefer stop_tray_from_thread() for production use; this function is
+    kept for backwards compatibility.
+    """
     if _tray_icon:
         _tray_icon.stop()
+
+
+def stop_tray_from_thread():
+    """Safe wrapper: always stop the tray loop from a separate daemon thread.
+
+    This prevents the deadlock that occurs when icon.stop() is called from
+    within a pystray callback (which runs on the same thread as the message
+    loop).  The separate thread can safely post WM_QUIT to the main thread's
+    message loop.
+    """
+    global _tray_icon
+    if _tray_icon is None:
+        return
+
+    def _stop_target():
+        try:
+            _tray_icon.stop()
+        except Exception:
+            pass  # icon may already be stopped, suppress noise
+
+    t = threading.Thread(target=_stop_target, daemon=True)
+    t.start()
+    # Give the daemon thread a moment to post WM_QUIT so run_tray() returns.
+    t.join(timeout=2.0)
+    _tray_icon = None

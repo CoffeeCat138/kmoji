@@ -6,9 +6,9 @@ forked from ACwyz/kmoji
 ## 功能特性
 
 - **智能颜文字生成**：读取光标前文字，调用 DeepSeek API 生成情感匹配的原创颜文字
-- **可配置快捷键**：支持双击 Shift（默认）、双击 Ctrl、或自定义组合键（如 Alt+J、Ctrl+Shift+K）
+- **可配置快捷键**：支持双击 Shift（默认）、双击 Ctrl
 - **系统托盘**：后台运行，托盘图标显示运行状态。左键→设置，右键→菜单
-- **图形化设置界面**（tkinter）：配置快捷键、日志、开机自启、API Key 管理
+- **图形化设置界面**（tkinter）：配置快捷键、日志、开机自启、模型与 API Key 管理
 - **日志系统**：RotatingFileHandler（1 MB × 3 份），DEBUG/INFO/WARNING/ERROR 四级
 - **开机自启动**：通过注册表 Run 键管理，设置界面一键开关
 - **安全存储**：API Key 优先使用 Windows 凭据管理器（keyring），降级到注册表直写
@@ -54,7 +54,6 @@ python kmoji.py --settings
 |---------|------|
 | 双击 Shift | 默认，连续快速按两次 Shift |
 | 双击 Ctrl | 可在设置中切换 |
-| 自定义组合 | 如 Alt+J、Ctrl+Shift+K，在设置界面捕获 |
 
 触发后自动执行：取光标前文本 → API 生成颜文字 → Ctrl+V 粘贴。
 
@@ -63,9 +62,9 @@ python kmoji.py --settings
 通过托盘菜单「设置」打开，包含四个标签页：
 
 - **启动**：开机自启动开关，实时显示当前状态
-- **快捷键**：启用/禁用开关、触发方式选择、自定义组合键捕获、双击间隔
+- **快捷键**：启用/禁用开关、触发方式选择、双击间隔
+- **模型**：API 地址、模型名称、API Key 管理
 - **日志**：日志开关、级别（DEBUG/INFO/WARNING/ERROR）、文件路径、打开目录/查看
-- **API Key**：显示当前 Key（脱敏：`sk-***abc`）、重新输入、清除
 
 ### API Key 管理
 

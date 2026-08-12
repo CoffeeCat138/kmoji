@@ -1,6 +1,6 @@
 """Kmoji — Kaomoji (颜文字) input tool for Windows.
 
-Double-tap Shift (or customisable hotkey) → select text behind cursor →
+Double-tap Shift or Ctrl → select text behind cursor →
 call DeepSeek API for kaomoji → paste via Ctrl+V.
 
 Usage:
@@ -56,6 +56,12 @@ def _effective_model() -> str:
 # ── module-level state ─────────────────────────────────────────────────────
 # Plain globals (NOT thread-local): hotkey handler runs on daemon threads
 # but needs access to the same client and settings window references.
+
+_shutting_down = False
+_shutdown_lock = threading.Lock()
+# _shutting_down is protected by _shutdown_lock because _shutdown() may be
+# called from tray menu callback (on pystray loop thread) or from
+# KeyboardInterrupt in main()'s finally (on main thread).
 
 _client = None
 _settings_win = None
@@ -226,7 +232,7 @@ def _toggle_enabled():
         cfg, _toggle_enabled, _show_settings, _do_quit
     )
     L = _logger.get_logger()
-    L.info(f"快捷键已{'禁用' if current else '启用'}")
+    L.info(f"已{'禁用' if current else '启用'}")
 
 
 def _show_settings():
@@ -272,18 +278,50 @@ def _do_quit():
 
 
 def _shutdown():
-    """Clean shutdown sequence."""
+    """Clean shutdown sequence (idempotent, thread-safe).
+
+    This function may be called from multiple threads (tray menu callback
+    on pystray loop thread, or main()'s finally after Ctrl+C on main
+    thread).  The re-entrancy guard ensures the real shutdown work happens
+    at most once.
+
+    IMPORTANT: pystray's icon.stop() must be called from a thread OTHER than
+    the one currently running the pystray message loop (which is the main
+    thread when run_tray() is blocking).  If stop() is called from within a
+    pystray menu callback (which runs on the same loop thread), it deadlocks
+    because stop() posts WM_QUIT and then waits for the loop to exit, but the
+    loop can't exit while it's still processing the callback.
+
+    We therefore spawn a short-lived daemon thread to call stop_tray() so
+    that the main thread's run_tray() can return cleanly.
+    """
+    global _shutting_down
+    with _shutdown_lock:
+        if _shutting_down:
+            return
+        _shutting_down = True
+
     L = _logger.get_logger()
     L.info("正在关闭…")
 
     _hotkey.stop()
+
+    # _settings_win lives on its own daemon thread.  Calling destroy() from
+    # here is a cross-thread tkinter operation.  We mitigate the risk by:
+    #  - using root.after_idle(0, root.destroy) to schedule destruction on
+    #    the correct thread (if the window object is still alive), and
+    #  - wrapping the whole thing in try/except as a safety net.
     if _settings_win:
         try:
-            _settings_win.destroy()
+            _settings_win.root.after_idle(_settings_win.root.destroy)
+            _settings_win.root.update_idletasks()
         except Exception:
             pass
     _logger.log_shutdown()
-    _tray.stop_tray()
+
+    # Call stop_tray() from a different thread to avoid deadlocking with
+    # pystray's own message loop (see docstring above).
+    _tray.stop_tray_from_thread()
 
 
 # ── main ───────────────────────────────────────────────────────────────────

@@ -3,9 +3,9 @@
 Provides:
 - Startup toggle (read/write HKCU Run key)
 - Hotkey enable/disable switch
-- Trigger type selection (double-Shift / double-Ctrl / custom)
-- Custom hotkey capture (press one combo to set it)
+- Trigger type selection (double-Shift / double-Ctrl)
 - Logging settings (enabled, level, path, open-dir, recent-logs)
+- API base URL and model configuration
 - API Key management (masked display, re-enter, clear)
 """
 import os
@@ -99,19 +99,16 @@ class SettingsWindow:
         self._page_hotkey = ttk.Frame(nb)
         self._page_model = ttk.Frame(nb)
         self._page_log = ttk.Frame(nb)
-        self._page_apikey = ttk.Frame(nb)
 
         nb.add(self._page_startup, text="启动")
         nb.add(self._page_hotkey, text="快捷键")
         nb.add(self._page_model, text="模型")
         nb.add(self._page_log, text="日志")
-        nb.add(self._page_apikey, text="API Key")
 
         self._build_startup()
         self._build_hotkey()
         self._build_model()
         self._build_log()
-        self._build_apikey()
 
     def _build_startup(self):
         f = ttk.Labelframe(self._page_startup, text="开机自启动", padding=10)
@@ -144,7 +141,7 @@ class SettingsWindow:
             value=self.cfg.get("hotkey_enabled", True)
         )
         cb = ttk.Checkbutton(
-            f, text="启用快捷键",
+            f, text="启用",
             variable=self._hotkey_enabled_var,
             command=self._save_hotkey,
         )
@@ -160,32 +157,12 @@ class SettingsWindow:
         opts = ttk.Combobox(
             trigger_frame,
             textvariable=self._trigger_var,
-            values=["double_shift", "double_ctrl", "custom"],
+            values=["double_shift", "double_ctrl"],
             state="readonly",
             width=15,
         )
         opts.pack(side=tk.LEFT, padx=6)
-        opts.bind("<<ComboboxSelected>>", self._on_trigger_type_change)
-
-        # -- custom combo field --
-        custom_frame = ttk.Frame(f)
-        custom_frame.pack(fill=tk.X, pady=(6, 0))
-
-        ttk.Label(custom_frame, text="自定义组合键:").pack(side=tk.LEFT)
-        self._custom_var = tk.StringVar(value=self.cfg.get("custom_trigger", ""))
-        self._custom_entry = ttk.Entry(
-            custom_frame, textvariable=self._custom_var, width=16, state="readonly"
-        )
-        self._custom_entry.pack(side=tk.LEFT, padx=6)
-
-        self._capture_btn = ttk.Button(
-            custom_frame, text="捕获", width=6, command=self._start_capture
-        )
-        self._capture_btn.pack(side=tk.LEFT)
-
-        if self._trigger_var.get() != "custom":
-            self._custom_entry.configure(state="disabled")
-            self._capture_btn.configure(state="disabled")
+        opts.bind("<<ComboboxSelected>>", lambda e: self._save_hotkey())
 
         # -- interval --
         intv_frame = ttk.Frame(f)
@@ -235,6 +212,26 @@ class SettingsWindow:
             "修改后会自动重建客户端。",
             foreground="gray",
         ).pack(anchor=tk.W, pady=(8, 0))
+
+        # -- API Key management (moved from dedicated tab) --
+        key_frame = ttk.Labelframe(
+            self._page_model, text="API Key 管理", padding=10
+        )
+        key_frame.pack(fill=tk.X, padx=10, pady=(6, 10))
+
+        current_key = _security_module.load_api_key()
+        masked = _security_module.mask_key(current_key)
+        self._apikey_label = ttk.Label(key_frame, text=f"当前 Key: {masked}")
+        self._apikey_label.pack(anchor=tk.W)
+
+        btn_frame = ttk.Frame(key_frame)
+        btn_frame.pack(pady=(8, 0))
+        ttk.Button(
+            btn_frame, text="重新输入", command=self._re_enter_key
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            btn_frame, text="清除 Key", command=self._clear_key
+        ).pack(side=tk.LEFT)
 
     def _build_log(self):
         f = ttk.Labelframe(self._page_log, text="日志设置", padding=10)
@@ -288,24 +285,6 @@ class SettingsWindow:
             btn_frame, text="查看最近日志", command=self._view_recent_log
         ).pack(side=tk.LEFT)
 
-    def _build_apikey(self):
-        f = ttk.Labelframe(self._page_apikey, text="API Key 管理", padding=10)
-        f.pack(fill=tk.X, padx=10, pady=10)
-
-        current_key = _security_module.load_api_key()
-        masked = _security_module.mask_key(current_key)
-        self._apikey_label = ttk.Label(f, text=f"当前 Key: {masked}")
-        self._apikey_label.pack(anchor=tk.W)
-
-        btn_frame = ttk.Frame(f)
-        btn_frame.pack(pady=(8, 0))
-        ttk.Button(
-            btn_frame, text="重新输入", command=self._re_enter_key
-        ).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(
-            btn_frame, text="清除 Key", command=self._clear_key
-        ).pack(side=tk.LEFT)
-
     # ── actions ───────────────────────────────────────────────────────
 
     def _toggle_startup(self):
@@ -320,76 +299,11 @@ class SettingsWindow:
     def _save_hotkey(self, *_):
         self.cfg.set("hotkey_enabled", self._hotkey_enabled_var.get())
         self.cfg.set("trigger_type", self._trigger_var.get())
-        self.cfg.set("custom_trigger", self._custom_var.get())
         self.cfg.set("double_press_interval", self._interval_var.get())
         # Push to hotkey module for live update
         _hotkey_module.update_config(self.cfg)
 
-    def _on_trigger_type_change(self, event=None):
-        if self._trigger_var.get() == "custom":
-            self._custom_entry.configure(state="readonly")
-            self._capture_btn.configure(state="normal")
-        else:
-            self._custom_entry.configure(state="disabled")
-            self._capture_btn.configure(state="disabled")
-        self._save_hotkey()
-
-    def _start_capture(self):
-        """Capture one key combo from the user."""
-        self._capture_btn.configure(text="请按键…", state="disabled")
-        self.root.update()
-
-        from pynput import keyboard
-        # Store captured state on self so _finish_capture can read it.
-        self.__capture_data = {"combo": None, "pressed": set()}
-        sd = self.__capture_data
-
-        def on_press(key):
-            if hasattr(key, "name"):
-                name = key.name
-                # Normalise left/right to base name
-                base = name.replace("_l", "").replace("_r", "")
-                if base in ("ctrl", "shift", "alt"):
-                    sd["pressed"].add(base)
-                else:
-                    sd["pressed"].add(name)
-            elif hasattr(key, "char"):
-                sd["pressed"].add(key.char)
-            else:
-                sd["pressed"].add(str(key))
-
-        def on_release(key):
-            if sd["combo"] is not None:
-                return  # already captured
-            modifiers = sorted(
-                p for p in sd["pressed"] if p.lower() in ("ctrl", "shift", "alt")
-            )
-            normal = [
-                p for p in sd["pressed"]
-                if p.lower() not in ("ctrl", "shift", "alt")
-            ]
-            if normal:
-                parts = [p.title() for p in modifiers]
-                n = normal[0]
-                parts.append(n.upper() if len(n) == 1 else n)
-                sd["combo"] = "+".join(parts)
-            listener_instance.stop()
-            self.root.after(0, self._finish_capture)
-
-        listener_instance = keyboard.Listener(
-            on_press=on_press, on_release=on_release
-        )
-        listener_instance.start()
-
-    def _finish_capture(self):
-        self._capture_btn.configure(text="捕获", state="normal")
-        sd = getattr(self, "__capture_data", None)
-        if sd and sd.get("combo"):
-            self._custom_var.set(sd["combo"])
-        self.__capture_data = {}
-        self._save_hotkey()
-
-    # ── log actions ───────────────────────────────────────────────────
+    # ── model actions ─────────────────────────────────────────────────
 
     def _save_model(self, *_):
         """Persist base_url and model, then rebuild the OpenAI client."""
@@ -535,28 +449,20 @@ class SettingsWindow:
         # Refresh hotkey page (may have changed via tray menu)
         self._hotkey_enabled_var.set(self.cfg.get("hotkey_enabled", True))
         self._trigger_var.set(self.cfg.get("trigger_type", "double_shift"))
-        self._custom_var.set(self.cfg.get("custom_trigger", ""))
         self._interval_var.set(self.cfg.get("double_press_interval", 0.5))
         # Refresh log page (may have changed via tray menu / other windows)
         self._log_enabled_var.set(self.cfg.get("logging_enabled", True))
         self._log_level_var.set(self.cfg.get("log_level", "INFO"))
         default_path = _logger_module._get_default_log_path()
         self._log_path_var.set(self.cfg.get("log_path") or default_path)
+        # Refresh model page
+        self._model_url_var.set(self.cfg.get("base_url"))
+        self._model_var.set(self.cfg.get("model"))
         # Refresh API key
         current_key = _security_module.load_api_key()
         self._apikey_label.configure(
             text=f"当前 Key: {_security_module.mask_key(current_key)}"
         )
-        # Refresh model page
-        self._model_url_var.set(self.cfg.get("base_url"))
-        self._model_var.set(self.cfg.get("model"))
-        # Re-apply custom-combo widget enabled state
-        if self._trigger_var.get() == "custom":
-            self._custom_entry.configure(state="readonly")
-            self._capture_btn.configure(state="normal")
-        else:
-            self._custom_entry.configure(state="disabled")
-            self._capture_btn.configure(state="disabled")
 
     def run(self):
         """Enter the tkinter main loop (blocking)."""
