@@ -2,9 +2,11 @@
 name: Build Windows Executable
 
 on:
-  push:
-    branches: [ main ]  # 当推送到 main 分支时触发
-  workflow_dispatch:    # 允许你从 GitHub 页面手动触发
+  workflow_dispatch:        # 保留手动触发（可用于测试）
+
+# 必须授予写权限才能创建 Release 和上传文件
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -17,12 +19,18 @@ jobs:
     - name: Package Application with PyInstaller
       uses: sayyid5416/pyinstaller@v1
       with:
-        spec: 'kmoji.py'
-        # 指定依赖文件
+        spec: 'kmoji.py'                 # 你的主脚本
         requirements: 'requirements.txt'
-        # PyInstaller 的额外选项，用逗号分隔
         options: --onefile, --name "kmoji", --windowed
-        # 指定 Python 版本
         python_ver: '3.10'
-        # 上传的 artifact 名称
-        upload_exe_with_name: 'kmoji'
+        upload_exe_with_name: 'kmoji'    # 该 Action 会生成一个 Artifact（也保留在 dist/ 下）
+
+    # 新增：将打包好的 exe 上传到 GitHub Release
+    - name: Create Release and Upload Asset
+      uses: softprops/action-gh-release@v2
+      with:
+        # 默认从 github.ref 获取标签名（如果是标签触发）
+        # 上传 dist/kmoji.exe（假设 PyInstaller 输出到该路径）
+        files: dist/kmoji.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
