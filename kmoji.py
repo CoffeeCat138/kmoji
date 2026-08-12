@@ -221,18 +221,36 @@ def _handle_hotkey():
 
 # ── tray callbacks ─────────────────────────────────────────────────────────
 
+def _refresh_tray_from_config(cfg):
+    """根据 config 刷新托盘 tooltip 和菜单。
+
+    cfg 为 None 时直接返回（尚未初始化）。
+    """
+    if cfg is None:
+        return
+    _tray.update_tray_tooltip(cfg)
+    _tray.update_tray_menu(cfg, _toggle_enabled, _show_settings, _do_quit)
+
+
 def _toggle_enabled():
     """Toggle hotkey enabled flag and update tray + GUI."""
     cfg = _config._config_instance
     current = cfg.get("hotkey_enabled", True)
     cfg.set("hotkey_enabled", not current)
     _hotkey.update_config(cfg)
-    _tray.update_tray_tooltip(cfg)
-    _tray.update_tray_menu(
-        cfg, _toggle_enabled, _show_settings, _do_quit
-    )
+    _refresh_tray_from_config(cfg)
     L = _logger.get_logger()
     L.info(f"已{'禁用' if current else '启用'}")
+
+
+def _sync_tray_from_hotkey():
+    """读取当前 config 并刷新托盘 tooltip 和菜单。
+
+    此函数作为回调注入到 SettingsWindow._on_hotkey_state_change，
+    当用户在设置窗口切换「启用」复选框时触发，保证托盘图标状态
+    与设置界面实时同步。
+    """
+    _refresh_tray_from_config(_config._config_instance)
 
 
 def _show_settings():
@@ -259,6 +277,8 @@ def _show_settings():
             gui_obj = _gui.SettingsWindow(cfg)
             gui_obj._on_key_change = _reinit_client
             gui_obj._on_api_config_change = _reinit_client_from_config
+            # 注入托盘同步回调：设置窗口切换启用状态后自动刷新托盘图标
+            gui_obj._on_hotkey_state_change = _sync_tray_from_hotkey
             with _settings_win_lock:
                 _settings_win = gui_obj
             gui_obj.run()

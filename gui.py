@@ -43,7 +43,13 @@ def _startup_status():
 
 
 def _startup_set(enable: bool):
-    """Add or remove the kmoji value in HKCU Run."""
+    """Add or remove the kmoji value in HKCU Run.
+
+    写入规则（兼容源码运行和 PyInstaller 打包两种形态）：
+    - 打包为 exe（sys.frozen 为 True）：直接写 exe 的绝对路径，双击即启动。
+    - 源码 .py 运行：写 "python解释器绝对路径" "脚本绝对路径"，确保自启动
+      时能正确找到入口脚本（否则只启动解释器而不加载脚本，会静默失败）。
+    """
     if sys.platform != "win32":
         return
     import winreg
@@ -55,8 +61,21 @@ def _startup_set(enable: bool):
             key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, _STARTUP_KEY)
 
         if enable:
-            exe_path = os.path.abspath(sys.executable)
-            winreg.SetValueEx(key, _STARTUP_VALUE, 0, winreg.REG_SZ, exe_path)
+            # 判断是否为 PyInstaller 打包后的 exe
+            if getattr(sys, 'frozen', False):
+                # 打包场景：sys.executable 即 kmoji.exe 的绝对路径，
+                # 双击 exe 即可正常启动，不依赖工作目录。
+                exe_path = os.path.abspath(sys.executable)
+                startup_value = f'"{exe_path}"'
+            else:
+                # 源码运行场景：需要同时指定解释器和脚本路径，
+                # 否则注册表只启动 python.exe 而不会加载 .py 入口。
+                exe_path = os.path.abspath(sys.executable)
+                # 入口脚本路径：源码运行时 sys.argv[0] 即 kmoji.py；
+                # absolutize 后含空格等特殊字符也能被注册表正确启动。
+                script_path = os.path.abspath(sys.argv[0])
+                startup_value = f'"{exe_path}" "{script_path}"'
+            winreg.SetValueEx(key, _STARTUP_VALUE, 0, winreg.REG_SZ, startup_value)
         else:
             try:
                 winreg.DeleteValue(key, _STARTUP_VALUE)
@@ -76,7 +95,8 @@ class SettingsWindow:
     def __init__(self, cfg: _cfg_module.Config, on_close=None):
         self.cfg = cfg
         self._on_close = on_close
-        self._on_key_change = None  # set externally by caller
+        self._on_key_change = None  # 由外部调用者注入，API Key 变化时回调
+        self._on_hotkey_state_change = None  # 由外部注入，快捷键启用状态变化时回调（刷新托盘）
 
         self.root = tk.Tk()
         self.root.title("Kmoji 设置")
@@ -297,11 +317,16 @@ class SettingsWindow:
         )
 
     def _save_hotkey(self, *_):
+        old_enabled = self.cfg.get("hotkey_enabled")
         self.cfg.set("hotkey_enabled", self._hotkey_enabled_var.get())
         self.cfg.set("trigger_type", self._trigger_var.get())
         self.cfg.set("double_press_interval", self._interval_var.get())
         # Push to hotkey module for live update
         _hotkey_module.update_config(self.cfg)
+        # 只在「启用」状态实际切换时才刷新托盘（切换触发方式/双击间隔不需要）
+        new_enabled = self.cfg.get("hotkey_enabled")
+        if self._on_hotkey_state_change and old_enabled != new_enabled:
+            self._on_hotkey_state_change()
 
     # ── model actions ─────────────────────────────────────────────────
 
