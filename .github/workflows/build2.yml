@@ -1,8 +1,11 @@
 # .github/workflows/build.yml
 name: Build Windows Executable with Nuitka
 
-on:               # 推送 v1.0.0 等标签时自动触发
-  workflow_dispatch:        # 手动触发，允许指定 Release 标签名
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
     inputs:
       tag:
         description: 'Release 标签名（例如 v1.0.0）'
@@ -24,16 +27,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'       # 与之前保持一致
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # 安装 Nuitka 及其 Windows 依赖
-          pip install nuitka
-          # 如需打包包含 GUI（--windows-disable-console），建议安装 zstandard 以加速压缩
-          pip install zstandard
+          pip install nuitka zstandard
 
       - name: Build executable with Nuitka
         run: |
@@ -43,9 +43,9 @@ jobs:
             --windows-disable-console `
             --output-dir=dist `
             --output-filename=kmoji.exe `
+            --assume-yes-for-downloads `
             kmoji.py
 
-      # （可选）压缩 exe 为 zip，便于下载
       - name: Compress artifact
         run: |
           Compress-Archive -Path dist/kmoji.exe -DestinationPath kmoji-windows.zip
